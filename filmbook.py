@@ -1,8 +1,7 @@
 import csv
 import time
 import logging
-import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from facebook_scraper import get_posts
 
@@ -120,61 +119,64 @@ def contains_keywords(text, keywords):
             return True, keyword
     return False, None
 
-# Function to scrape Facebook group posts and save to CSV
+# Function to scrape Facebook group posts and collect them
 def scrape_facebook_group_posts(group_id, pages, cookies=None):
     batch_size = 10  # Number of posts to collect before writing to CSV
-    csv_file = f'{group_id}_posts.csv'
     post_list = []
 
-    # Open CSV file for appending
+    # Scrape posts
+    try:
+        for post in get_posts(group=group_id, pages=pages, cookies=cookies, options={"whitelist_methods": ["extract_text", "extract_post_url", "extract_time"]}):
+            # Get post details
+            text = post.get('text', '')  # Use 'text' instead of 'post_text'
+            post_time = post.get('time', '')
+            post_url = post.get('post_url', '')
+
+
+            # Check if post text contains any of the keywords
+            matched, keyword = contains_keywords(text, HIRING)
+            if matched:
+                found, position_keyword = contains_keywords(text, POSITIONS)
+                if found:
+                    # Debug: print post information
+                    logging.info(f'Text: {text[:50]}, Time: {post_time}, Matched Keyword: {position_keyword}')
+
+                    # Add post information to list
+                    post_list.append([post_time, position_keyword, text, post_url])
+
+                    # Write to CSV in batches
+                    if len(post_list) >= batch_size:
+                        return post_list
+                        post_list.clear()  # Clear the list after writing
+
+            # To avoid rate limiting, add a delay between requests
+            time.sleep(0.5)
+    except Exception as e:
+        logging.error(f'An error occurred while scraping group {group_id}: {e}')
+
+    return post_list
+
+if __name__ == '__main__':
+    # Use ThreadPoolExecutor to scrape multiple groups in parallel
+    all_posts = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(scrape_facebook_group_posts, group_id, PAGES_TO_SCRAPE, COOKIES_FILE) for group_id in GROUP_IDS]
+        
+        for future in as_completed(futures):
+            try:
+                all_posts.extend(future.result())
+            except Exception as e:
+                logging.error(f'Error in thread: {e}')
+
+    # Write all posts to a single CSV file
+    csv_file = 'last_24_hours_posts.csv'
     with open(csv_file, mode='a', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
         # Write CSV header if the file is empty
         if file.tell() == 0:
             writer.writerow(['time', 'matched_keyword', 'text', 'post_url'])
 
-        # Scrape posts
-        try:
-            for post in get_posts(group=group_id, pages=pages, cookies=cookies, options={"whitelist_methods": ["extract_text", "extract_post_url", "extract_time"]}):
-                # Get post details
-                text = post.get('text', '')  # Use 'text' instead of 'post_text'
-                post_time = post.get('time', '')
-                post_url = post.get('post_url', '')
-
-                # Check if post text contains any of the keywords
-                matched, keyword = contains_keywords(text, HIRING)
-                if matched:
-                    found, position_keyword = contains_keywords(text, POSITIONS)
-                    if found:
-                        # Debug: print post information
-                        logging.info(f'Text: {text[:50]}, Time: {post_time}, Matched Keyword: {position_keyword}')
-
-                        # Add post information to list
-                        post_list.append([post_time, position_keyword, text, post_url])
-
-                        # Write to CSV in batches
-                        if len(post_list) >= batch_size:
-                            writer.writerows(post_list)
-                            post_list.clear()  # Clear the list after writing
-
-                # To avoid rate limiting, add a delay between requests
-                time.sleep(0.5)
-        except Exception as e:
-            logging.error(f'An error occurred while scraping group {group_id}: {e}')
-
-        # Write any remaining posts to CSV
-        if post_list:
-            writer.writerows(post_list)
-
-if __name__ == '__main__':
-    # Use ThreadPoolExecutor to scrape multiple groups in parallel
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [executor.submit(scrape_facebook_group_posts, group_id, PAGES_TO_SCRAPE, COOKIES_FILE) for group_id in GROUP_IDS]
-        
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                logging.error(f'Error in thread: {e}')
+        # Write all posts collected in batches
+        writer.writerows(all_posts)
 
     logging.info(f'Successfully scraped {PAGES_TO_SCRAPE} pages of posts from groups {GROUP_IDS}')
